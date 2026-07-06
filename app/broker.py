@@ -12,7 +12,7 @@ from redis.exceptions import RedisError, ResponseError
 
 logger = logging.getLogger(__name__)
 
-RedisScalar: TypeAlias = bytes | bytearray | memoryview[int] | str | int | float
+RedisScalar: TypeAlias = bytes | bytearray | memoryview | str | int | float
 
 
 class BrokerError(RuntimeError):
