@@ -1,11 +1,10 @@
-"""SynapseMesh application package."""
+"""SwarmBus distributed event fabric package."""
 
 __all__ = [
+    "broker",
     "config",
-    "database",
-    "guard",
+    "detector",
+    "locker",
     "main",
-    "mesh",
-    "models",
-    "router",
 ]
+

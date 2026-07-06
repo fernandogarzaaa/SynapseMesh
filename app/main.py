@@ -1,120 +1,149 @@
-"""FastAPI management plane and analytics ingress for SynapseMesh."""
+"""FastAPI ingress for the SwarmBus network coordination fabric."""
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from redis.asyncio import Redis
 
-from app.database import Base, engine, get_db
-from app.mesh import AutonomousConsensusMesh
-from app.models import ModelPerformanceAudit
+from app.broker import BrokerError, StreamBroker
+from app.config import settings
+from app.detector import DeadlockLoopInterceptor
+from app.locker import DistributedAgentLocker, LockError
 
-DbSession = Annotated[AsyncSession, Depends(get_db)]
-
-
-class NegotiateRequest(BaseModel):
-    """Request body for the mesh negotiation endpoint."""
-
-    task: str = Field(min_length=1)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
-class NegotiateResponse(BaseModel):
-    """Response body for a negotiated workflow."""
+class BroadcastRequest(BaseModel):
+    """Agent event submission payload for stream publication."""
 
-    audit_id: str
-    execution_state: str
-    classification: str
-    actor_model: str
-    critic_model: str
-    convergence_turns: int
-    total_tokens: int
-    elapsed_latency_ms: float
-    telemetry_signature: str
-    route_policy: dict[str, Any]
-    final_product: str
-    history: list[dict[str, Any]]
+    topic: str = Field(min_length=1)
+    event: dict[str, Any] = Field(default_factory=dict)
+    execution_history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class BroadcastResponse(BaseModel):
+    """Committed event identity returned by the broker."""
+
+    topic: str
+    event_id: str
+    accepted: bool
+
+
+class ClaimRequest(BaseModel):
+    """Task lock claim request submitted by an agent."""
+
+    task_id: str = Field(min_length=1)
+    agent_id: str = Field(min_length=1)
+
+
+class ClaimResponse(BaseModel):
+    """Task lock claim result."""
+
+    task_id: str
+    agent_id: str
+    acquired: bool
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> Any:
-    """Initialize database metadata at startup."""
-
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    yield
+async def lifespan(application: FastAPI) -> Any:
+    redis_client = Redis.from_url(settings.REDIS_URL, decode_responses=False)
+    application.state.redis = redis_client
+    application.state.broker = StreamBroker(redis_client)
+    application.state.locker = DistributedAgentLocker(redis_client)
+    application.state.detector = DeadlockLoopInterceptor()
+    logger.info(
+        "swarm_bus_application_started",
+        extra={"environment": settings.AGENT_BUS_ENV, "redis_url": settings.REDIS_URL},
+    )
+    try:
+        yield
+    finally:
+        await redis_client.aclose()
+        logger.info("swarm_bus_application_stopped")
 
 
 app = FastAPI(
-    title="SynapseMesh",
+    title="SwarmBus",
     version="0.1.0",
-    description="Autonomous multi-model negotiation loop and semantic routing gateway.",
+    description="Event-driven multi-agent message broker and coordination fabric.",
     lifespan=lifespan,
 )
 
 
-@app.post("/v1/mesh/negotiate", response_model=NegotiateResponse)
-async def negotiate_mesh(request: NegotiateRequest, db: DbSession) -> NegotiateResponse:
-    """Run an actor-critic negotiation workflow."""
-
-    mesh = AutonomousConsensusMesh()
-    result = await mesh.negotiate_workflow(db, request.task)
-    return NegotiateResponse.model_validate(result)
+def get_broker(request: Request) -> StreamBroker:
+    return cast(StreamBroker, request.app.state.broker)
 
 
-@app.get("/v1/mesh/telemetry")
-async def mesh_telemetry(db: DbSession) -> dict[str, Any]:
-    """Return aggregate performance analytics across model pairs."""
+def get_locker(request: Request) -> DistributedAgentLocker:
+    return cast(DistributedAgentLocker, request.app.state.locker)
 
-    total_result = await db.execute(select(func.count(ModelPerformanceAudit.id)))
-    total_runs = int(total_result.scalar_one())
 
-    grouped_result = await db.execute(
-        select(
-            ModelPerformanceAudit.actor_model,
-            ModelPerformanceAudit.critic_model,
-            func.count(ModelPerformanceAudit.id),
-            func.avg(ModelPerformanceAudit.convergence_turns),
-            func.avg(ModelPerformanceAudit.elapsed_latency_ms),
-            func.sum(ModelPerformanceAudit.total_tokens),
-            func.sum(
-                case(
-                    (ModelPerformanceAudit.execution_state == "SUCCESS", 1),
-                    else_=0,
-                )
-            ),
-        ).group_by(ModelPerformanceAudit.actor_model, ModelPerformanceAudit.critic_model)
-    )
+def get_detector(request: Request) -> DeadlockLoopInterceptor:
+    return cast(DeadlockLoopInterceptor, request.app.state.detector)
 
-    model_pairs: list[dict[str, Any]] = []
-    for row in grouped_result.all():
-        run_count = int(row[2])
-        success_count = int(row[6] or 0)
-        model_pairs.append(
-            {
-                "actor_model": row[0],
-                "critic_model": row[1],
-                "runs": run_count,
-                "average_turns_to_consensus": float(row[3] or 0.0),
-                "average_latency_ms": float(row[4] or 0.0),
-                "total_tokens": int(row[5] or 0),
-                "success_ratio": success_count / run_count if run_count else 0.0,
-            }
+
+BrokerDependency = Annotated[StreamBroker, Depends(get_broker)]
+DetectorDependency = Annotated[DeadlockLoopInterceptor, Depends(get_detector)]
+LockerDependency = Annotated[DistributedAgentLocker, Depends(get_locker)]
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    return {"status": "ok", "environment": settings.AGENT_BUS_ENV}
+
+
+@app.post("/v1/bus/broadcast", response_model=BroadcastResponse)
+async def broadcast_event(
+    payload: BroadcastRequest,
+    broker: BrokerDependency,
+    detector: DetectorDependency,
+) -> BroadcastResponse:
+    try:
+        if not detector.validate_trajectory(payload.execution_history):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="execution trajectory rejected by loop interceptor",
+            )
+        event_id = await broker.publish_event(payload.topic, payload.event)
+    except HTTPException:
+        raise
+    except (BrokerError, ValueError) as exc:
+        logger.exception(
+            "swarm_bus_broadcast_failed",
+            extra={"topic": payload.topic, "error_type": type(exc).__name__},
         )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="event could not be published",
+        ) from exc
 
-    state_result = await db.execute(
-        select(
-            ModelPerformanceAudit.execution_state,
-            func.count(ModelPerformanceAudit.id),
-        ).group_by(ModelPerformanceAudit.execution_state)
-    )
-    states = {str(row[0]): int(row[1]) for row in state_result.all()}
-    return {
-        "total_runs": total_runs,
-        "states": states,
-        "model_pairs": model_pairs,
-    }
+    return BroadcastResponse(topic=payload.topic, event_id=event_id, accepted=True)
+
+
+@app.post("/v1/bus/claim", response_model=ClaimResponse)
+async def claim_task(
+    payload: ClaimRequest,
+    locker: LockerDependency,
+) -> ClaimResponse:
+    try:
+        acquired = await locker.acquire_task_lock(payload.task_id, payload.agent_id)
+    except (LockError, ValueError) as exc:
+        logger.exception(
+            "swarm_bus_claim_failed",
+            extra={"task_id": payload.task_id, "agent_id": payload.agent_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="task lock could not be claimed",
+        ) from exc
+
+    return ClaimResponse(task_id=payload.task_id, agent_id=payload.agent_id, acquired=acquired)

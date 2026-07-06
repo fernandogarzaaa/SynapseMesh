@@ -1,29 +1,36 @@
 [project]
-name = "synapse-mesh"
+name = "swarm-bus"
 version = "0.1.0"
-description = "Autonomous multi-model negotiation loop and semantic routing gateway."
+description = "Production-grade event-driven multi-agent message broker and coordination fabric."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-authors = [
-    { name = "SynapseMesh Maintainers" }
+license = { text = "MIT" }
+authors = [{ name = "SwarmBus Maintainers" }]
+keywords = ["fastapi", "redis", "streams", "multi-agent", "coordination"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
 ]
 dependencies = [
-    "fastapi",
-    "uvicorn[standard]",
-    "httpx",
-    "sqlalchemy[asyncio]>=2.0",
-    "asyncpg",
-    "pydantic-settings",
-    "pydantic>=2.0",
+  "fastapi",
+  "uvicorn[standard]",
+  "redis[hiredis]>=5.0",
+  "pydantic-settings",
+  "pydantic>=2.0",
 ]
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
-    "pytest",
-    "pytest-asyncio",
-    "ruff",
-    "mypy",
-    "aiosqlite",
+  "pytest",
+  "pytest-asyncio",
+  "ruff",
+  "mypy",
 ]
 
 [build-system]
@@ -33,20 +40,25 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
+[tool.uv]
+package = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 100
 target-version = "py311"
+line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "C4", "SIM", "RUF"]
-ignore = ["S101"]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "SIM"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
-ignore_missing_imports = true
-plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+warn_unused_configs = true
+warn_return_any = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true

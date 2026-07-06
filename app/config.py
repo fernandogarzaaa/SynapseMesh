@@ -1,51 +1,34 @@
-"""Environment-driven settings for SynapseMesh."""
+"""Runtime configuration for the SwarmBus coordination fabric."""
 
-from functools import lru_cache
+from __future__ import annotations
 
-from pydantic import Field
+import logging
+
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
-    """Global runtime configuration parsed from environment variables."""
+    """Environment-backed SwarmBus settings."""
+
+    REDIS_URL: str = Field(default="redis://localhost:6379/0")
+    MAX_LOOP_DEPTH: int = Field(default=4, ge=1, le=128)
+    LOCK_TTL_MS: int = Field(default=10_000, ge=100, le=86_400_000)
+    AGENT_BUS_ENV: str = Field(default="production", min_length=1)
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=True,
         extra="ignore",
+        case_sensitive=True,
     )
 
-    DATABASE_URL: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5432/synapse_mesh",
-        description="Async SQLAlchemy database URL.",
-    )
-    OPENAI_API_URL: str = Field(
-        default="https://api.openai.com/v1/responses",
-        description="Public OpenAI-compatible model ingress endpoint.",
-    )
-    ANTHROPIC_API_URL: str = Field(
-        default="https://api.anthropic.com/v1/messages",
-        description="Public Anthropic-compatible model ingress endpoint.",
-    )
-    MAX_CONCURRENT_STREAM_LOOPS: int = Field(default=5, ge=1, le=50)
-    COMPLIANCE_MODE: str = Field(default="STRICT")
-    INTERNAL_OPENAI_API_URL: str = Field(
-        default="http://internal-model-gateway.local/openai",
-        description="Internal OpenAI-compatible endpoint used for restricted data.",
-    )
-    INTERNAL_ANTHROPIC_API_URL: str = Field(
-        default="http://internal-model-gateway.local/anthropic",
-        description="Internal Anthropic-compatible endpoint used for restricted data.",
-    )
-    PROVIDER_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0.0)
 
+try:
+    settings = Settings()
+except ValidationError:
+    logger.exception("swarm_bus_settings_validation_failed")
+    raise
 
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    """Return cached settings."""
-
-    return Settings()
-
-
-settings = get_settings()

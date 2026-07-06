@@ -1,1 +1,2 @@
-"""SynapseMesh tests."""
+"""SwarmBus test package."""
+
