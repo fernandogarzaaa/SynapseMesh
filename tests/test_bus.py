@@ -9,6 +9,7 @@ import pytest
 
 from app.detector import DeadlockLoopInterceptor
 from app.locker import DistributedAgentLocker
+from app.main import _deterministic_motor_commands
 
 
 @pytest.mark.asyncio
@@ -47,4 +48,12 @@ def test_loop_interception_rejects_cyclic_unmodified_handoff() -> None:
     ]
 
     assert detector.validate_trajectory(cyclic_history) is False
+
+
+def test_vla_command_sink_returns_stable_zero_commands_for_nominal_frame() -> None:
+    assert _deterministic_motor_commands(0.02, "NOMINAL_STABLE") == [0.0, 0.0, 0.0]
+
+
+def test_vla_command_sink_bounds_anomaly_commands() -> None:
+    assert _deterministic_motor_commands(2.0, "ANOMALY_TRIGGERED") == [1.0, -0.5, 0.0]
 

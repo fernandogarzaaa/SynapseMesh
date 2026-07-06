@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from inspect import isawaitable
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -74,7 +75,8 @@ class DistributedAgentLocker:
 
         lock_key = self._lock_key(task_id)
         try:
-            released = await self._redis.eval(self._RELEASE_SCRIPT, 1, lock_key, normalized_agent)
+            release_result = self._redis.eval(self._RELEASE_SCRIPT, 1, lock_key, normalized_agent)
+            released = await release_result if isawaitable(release_result) else release_result
         except RedisError as exc:
             logger.exception(
                 "swarm_bus_lock_release_failed",

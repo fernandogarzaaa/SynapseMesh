@@ -1,12 +1,12 @@
 [project]
-name = "swarm-bus"
+name = "synapse-mesh"
 version = "0.1.0"
-description = "Production-grade event-driven multi-agent message broker and coordination fabric."
+description = "Production-grade model mesh and VLA command intake service."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "SwarmBus Maintainers" }]
-keywords = ["fastapi", "redis", "streams", "multi-agent", "coordination"]
+keywords = ["fastapi", "model-routing", "vla", "multi-agent", "coordination"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Framework :: FastAPI",
@@ -21,6 +21,7 @@ dependencies = [
   "fastapi",
   "uvicorn[standard]",
   "redis[hiredis]>=5.0",
+  "python-multipart",
   "pydantic-settings",
   "pydantic>=2.0",
 ]
