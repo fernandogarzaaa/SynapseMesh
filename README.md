@@ -82,6 +82,44 @@ Settings load from the environment and an optional `.env` file (see
 | `POST /v1/bus/claim` | `{"task_id": str, "agent_id": str}` | Attempts to acquire a distributed lock on `task_id` for `agent_id`. Returns whether the lock was acquired. |
 | `POST /v1/vla/commands` | JSON body or multipart form (`frame_id`, `drift_score`, `frame_state`, optional file) | Accepts a VLA telemetry/anomaly frame, bounds `drift_score` into `[-1, 1]`, and returns deterministic, bounded `motor_commands`. |
 
+---
+
+## Semantic Model Routing
+
+SynapseMesh decides **what** model/provider a task should route to; it does not itself place live calls to any provider. That execution step -- the actual HTTP calls, retries, and provider failover -- is owned by the sibling `async-mcp-gateway` service. SynapseMesh hands that gateway a ranked decision it can walk through on failure.
+
+Routing is pure, deterministic scoring over a static catalog of model capability profiles (`app/catalog.py`) -- no embeddings, no network calls, no live LLM invocations. The catalog ships with a built-in default spanning a few providers and can be overridden via the `MODEL_CATALOG_PATH` environment variable, pointing at a JSON file of the same shape.
+
+### `POST /v1/route/select`
+
+**Request** (`RoutingRequest`):
+
+```json
+{
+  "task_description": "debug this function, it throws on empty input",
+  "required_context_tokens": 20000,
+  "requires_vision": false,
+  "requires_tool_use": true,
+  "latency_preference": "balanced",
+  "max_cost_tier": "high"
+}
+```
+
+**Response** (`RoutingDecision`, `200 OK`):
+
+```json
+{
+  "selected": { "provider": "anthropic", "model": "claude-mid-balanced", "...": "..." },
+  "fallback_chain": [ { "provider": "openai", "model": "gpt-large-frontier", "...": "..." } ],
+  "reasoning": "Task classified as [code]; selected anthropic/claude-mid-balanced (matches code, latency=balanced, cost=medium) under latency_preference='balanced'. Beat runner-up openai/gpt-large-frontier (2.75 vs 1.50).",
+  "matched_strengths": ["code"]
+}
+```
+
+The task description is classified against keyword-driven strength categories (`code`, `vision`, `long_context`, `reasoning`, defaulting to `chat`). Candidates are hard-filtered on context window, vision/tool-use support, and cost ceiling, then scored on strength match with latency-preference and cost-tier tiebreakers. When no catalog entry survives the hard filter, the endpoint returns `422 Unprocessable Entity` with a message naming the unmet constraints.
+
+`fallback_chain` carries the next-best ranked candidates (up to three) so `async-mcp-gateway` can walk them in order if the top pick's provider is degraded or rate-limited, without SynapseMesh needing to know anything about live provider health.
+
 Note: streaming subscription (`StreamBroker.subscribe_topic`) and lock release
 (`DistributedAgentLocker.release_task_lock`) exist as library methods but are not
 currently wired to an HTTP endpoint.
@@ -103,15 +141,10 @@ CI runs these same steps on every push/PR to `main` via
 
 ## Not Yet Implemented / Roadmap
 
-The sibling `agent-platform-os` repository's README currently describes
-SynapseMesh as providing **"semantic model routing"** across LLM providers. That
-capability does not exist in this repository today — there is no LLM client code,
-no model selection logic, and no provider-abstraction layer of any kind here.
-
-If semantic model routing (or the broader LLM-gateway feature set previously
-described in this README — data classification, policy/budget evaluation,
-`gen_ai.*` telemetry, idempotency keyed on model name) is still wanted for this
-service, it needs to be designed and built from scratch; none of the scaffolding
-for it currently exists in `app/`. Until then, references to SynapseMesh as an LLM
-gateway or model router (here or in other repos) should be treated as aspirational,
-not accurate.
+Semantic model routing (above) is now implemented — this section previously said
+it wasn't, before `POST /v1/route/select` existed. What's still missing from the
+broader LLM-gateway feature set an earlier README version described: data
+classification (PCI/PHI), policy/budget evaluation, OpenTelemetry `gen_ai.*`
+telemetry, and per-model-name idempotency control. None of that scaffolding
+exists in `app/`. If it's still wanted, it needs to be designed and built from
+scratch.
