@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     MAX_LOOP_DEPTH: int = Field(default=4, ge=1, le=128)
     LOCK_TTL_MS: int = Field(default=10_000, ge=100, le=86_400_000)
     AGENT_BUS_ENV: str = Field(default="production", min_length=1)
+    MODEL_CATALOG_PATH: str | None = Field(default=None)
 
     model_config = SettingsConfigDict(
         env_file=".env",

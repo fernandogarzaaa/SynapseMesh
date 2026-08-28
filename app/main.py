@@ -11,9 +11,11 @@ from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
 from app.broker import BrokerError, StreamBroker
+from app.catalog import ModelProfile, load_catalog
 from app.config import settings
 from app.detector import DeadlockLoopInterceptor
 from app.locker import DistributedAgentLocker, LockError
+from app.router import NoEligibleModelError, RoutingDecision, RoutingRequest, SemanticRouter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,6 +78,8 @@ async def lifespan(application: FastAPI) -> Any:
     application.state.broker = StreamBroker(redis_client)
     application.state.locker = DistributedAgentLocker(redis_client)
     application.state.detector = DeadlockLoopInterceptor()
+    application.state.model_catalog = load_catalog()
+    application.state.semantic_router = SemanticRouter()
     logger.info(
         "swarm_bus_application_started",
         extra={"environment": settings.AGENT_BUS_ENV, "redis_url": settings.REDIS_URL},
@@ -107,9 +111,19 @@ def get_detector(request: Request) -> DeadlockLoopInterceptor:
     return cast(DeadlockLoopInterceptor, request.app.state.detector)
 
 
+def get_model_catalog(request: Request) -> list[ModelProfile]:
+    return cast("list[ModelProfile]", request.app.state.model_catalog)
+
+
+def get_semantic_router(request: Request) -> SemanticRouter:
+    return cast(SemanticRouter, request.app.state.semantic_router)
+
+
 BrokerDependency = Annotated[StreamBroker, Depends(get_broker)]
 DetectorDependency = Annotated[DeadlockLoopInterceptor, Depends(get_detector)]
 LockerDependency = Annotated[DistributedAgentLocker, Depends(get_locker)]
+ModelCatalogDependency = Annotated[list[ModelProfile], Depends(get_model_catalog)]
+SemanticRouterDependency = Annotated[SemanticRouter, Depends(get_semantic_router)]
 
 
 @app.get("/healthz")
@@ -208,3 +222,18 @@ async def claim_task(
         ) from exc
 
     return ClaimResponse(task_id=payload.task_id, agent_id=payload.agent_id, acquired=acquired)
+
+
+@app.post("/v1/route/select", response_model=RoutingDecision)
+async def select_route(
+    payload: RoutingRequest,
+    catalog: ModelCatalogDependency,
+    router: SemanticRouterDependency,
+) -> RoutingDecision:
+    try:
+        return router.select(payload, catalog)
+    except NoEligibleModelError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
