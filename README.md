@@ -25,7 +25,9 @@ SynapseMesh/SwarmBus is a FastAPI service (`app/main.py`) built around three pie
   each event is processed exactly once per group.
 - **`app/locker.py` — `DistributedAgentLocker`**: a distributed lock manager for
   task ownership, using `SET NX PX` to acquire a lease and a Lua compare-and-delete
-  script to release it only if the releasing agent still owns the key.
+  script to release it only if the releasing agent still owns the key. Long-running
+  agents renew their lease (Lua compare-and-`PEXPIRE`) before `LOCK_TTL_MS` elapses,
+  so a competing agent can't claim a task that is still being worked on.
 - **`app/detector.py` — `DeadlockLoopInterceptor`**: DFS-based cycle detection over
   an agent handoff graph (built from an `execution_history` of `from`/`to` edges),
   combined with duplicate unmodified-payload detection, to reject handoff
@@ -80,6 +82,8 @@ Settings load from the environment and an optional `.env` file (see
 | `GET /healthz` | — | Liveness check; returns `{"status": "ok", "environment": ...}`. |
 | `POST /v1/bus/broadcast` | `{"topic": str, "event": {...}, "execution_history": [...]}` | Validates `execution_history` against the loop interceptor, then publishes `event` to the Redis Stream for `topic` via `XADD`. Returns the committed stream event ID. |
 | `POST /v1/bus/claim` | `{"task_id": str, "agent_id": str}` | Attempts to acquire a distributed lock on `task_id` for `agent_id`. Returns whether the lock was acquired. |
+| `POST /v1/bus/renew` | `{"task_id": str, "agent_id": str}` | Extends the lease by `LOCK_TTL_MS` if `agent_id` still owns it. Returns `{"ok": bool}`; `false` means the lock expired or belongs to another agent, so stop work. |
+| `POST /v1/bus/release` | `{"task_id": str, "agent_id": str}` | Releases the lease if `agent_id` owns it. Returns `{"ok": bool}`. |
 | `POST /v1/vla/commands` | JSON body or multipart form (`frame_id`, `drift_score`, `frame_state`, optional file) | Accepts a VLA telemetry/anomaly frame, bounds `drift_score` into `[-1, 1]`, and returns deterministic, bounded `motor_commands`. |
 
 ---
@@ -120,9 +124,8 @@ The task description is classified against keyword-driven strength categories (`
 
 `fallback_chain` carries the next-best ranked candidates (up to three) so `async-mcp-gateway` can walk them in order if the top pick's provider is degraded or rate-limited, without SynapseMesh needing to know anything about live provider health.
 
-Note: streaming subscription (`StreamBroker.subscribe_topic`) and lock release
-(`DistributedAgentLocker.release_task_lock`) exist as library methods but are not
-currently wired to an HTTP endpoint.
+Note: streaming subscription (`StreamBroker.subscribe_topic`) exists as a library
+method but is not currently wired to an HTTP endpoint.
 
 ---
 

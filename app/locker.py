@@ -27,6 +27,15 @@ class DistributedAgentLocker:
     return 0
     """
 
+    # Extend a lease only while the caller still owns it; never resurrects an
+    # expired or foreign lock.
+    _RENEW_SCRIPT = """
+    if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+    end
+    return 0
+    """
+
     def __init__(self, redis_client: Redis, *, key_prefix: str = "swarmbus:lock") -> None:
         self._redis = redis_client
         self._key_prefix = key_prefix.strip(":")
@@ -66,7 +75,43 @@ class DistributedAgentLocker:
         )
         return result
 
-    async def release_task_lock(self, task_id: str, agent_id: str) -> None:
+    async def _owner_eval(self, script: str, task_id: str, agent_id: str, *args: str) -> bool:
+        normalized_agent = agent_id.strip()
+        if not normalized_agent:
+            raise ValueError("agent_id must not be empty")
+        lock_key = self._lock_key(task_id)
+        result = self._redis.eval(script, 1, lock_key, normalized_agent, *args)
+        value = await result if isawaitable(result) else result
+        return bool(int(value or 0))
+
+    async def renew_task_lock(
+        self, task_id: str, agent_id: str, ttl_ms: int | None = None
+    ) -> bool:
+        """Extend the lease TTL when ``agent_id`` still owns the task lock.
+
+        Long-running agents call this before ``LOCK_TTL_MS`` elapses so a
+        competing agent cannot claim a task that is still being worked on.
+        Returns False when the lock expired or belongs to someone else.
+        """
+
+        ttl = settings.LOCK_TTL_MS if ttl_ms is None else ttl_ms
+        if ttl <= 0:
+            raise ValueError("ttl_ms must be positive")
+        try:
+            renewed = await self._owner_eval(self._RENEW_SCRIPT, task_id, agent_id, str(ttl))
+        except RedisError as exc:
+            logger.exception(
+                "swarm_bus_lock_renew_failed",
+                extra={"task_id": task_id, "agent_id": agent_id},
+            )
+            raise LockError(f"failed to renew lock for task {task_id!r}") from exc
+        logger.info(
+            "swarm_bus_lock_renew_result",
+            extra={"task_id": task_id, "agent_id": agent_id, "renewed": renewed},
+        )
+        return renewed
+
+    async def release_task_lock(self, task_id: str, agent_id: str) -> bool:
         """Release a task lease only when the requesting agent owns the Redis key."""
 
         normalized_agent = agent_id.strip()
@@ -92,4 +137,5 @@ class DistributedAgentLocker:
                 "released": bool(int(released)),
             },
         )
+        return bool(int(released))
 
