@@ -59,6 +59,14 @@ class ClaimResponse(BaseModel):
     acquired: bool
 
 
+class LeaseResponse(BaseModel):
+    """Result of renewing or releasing a task lock."""
+
+    task_id: str
+    agent_id: str
+    ok: bool
+
+
 class VLACommandResponse(BaseModel):
     """Accepted VLA command routing result."""
 
@@ -222,6 +230,46 @@ async def claim_task(
         ) from exc
 
     return ClaimResponse(task_id=payload.task_id, agent_id=payload.agent_id, acquired=acquired)
+
+
+@app.post("/v1/bus/renew", response_model=LeaseResponse)
+async def renew_task(
+    payload: ClaimRequest,
+    locker: LockerDependency,
+) -> LeaseResponse:
+    """Extend the caller's lease; ``ok`` is false if it no longer owns the task."""
+    try:
+        ok = await locker.renew_task_lock(payload.task_id, payload.agent_id)
+    except (LockError, ValueError) as exc:
+        logger.exception(
+            "swarm_bus_renew_failed",
+            extra={"task_id": payload.task_id, "agent_id": payload.agent_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="task lock could not be renewed",
+        ) from exc
+    return LeaseResponse(task_id=payload.task_id, agent_id=payload.agent_id, ok=ok)
+
+
+@app.post("/v1/bus/release", response_model=LeaseResponse)
+async def release_task(
+    payload: ClaimRequest,
+    locker: LockerDependency,
+) -> LeaseResponse:
+    """Release the caller's lease; ``ok`` is false if it did not own the task."""
+    try:
+        ok = await locker.release_task_lock(payload.task_id, payload.agent_id)
+    except (LockError, ValueError) as exc:
+        logger.exception(
+            "swarm_bus_release_failed",
+            extra={"task_id": payload.task_id, "agent_id": payload.agent_id},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="task lock could not be released",
+        ) from exc
+    return LeaseResponse(task_id=payload.task_id, agent_id=payload.agent_id, ok=ok)
 
 
 @app.post("/v1/route/select", response_model=RoutingDecision)
