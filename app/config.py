@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     LOCK_TTL_MS: int = Field(default=10_000, ge=100, le=86_400_000)
     AGENT_BUS_ENV: str = Field(default="production", min_length=1)
     MODEL_CATALOG_PATH: str | None = Field(default=None)
+    SYNAPSEMESH_API_KEY: str = Field(
+        default="",
+        description=(
+            "When set, /v1/bus/* and /v1/route/select require this key in an "
+            "X-API-Key or 'Authorization: Bearer' header."
+        ),
+    )
+    VLA_MAX_UPLOAD_BYTES: int = Field(default=16 * 1024 * 1024, ge=1)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -32,4 +40,3 @@ try:
 except ValidationError:
     logger.exception("swarm_bus_settings_validation_failed")
     raise
-
