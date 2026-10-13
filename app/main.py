@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
+import math
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, cast
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
@@ -101,7 +113,7 @@ async def lifespan(application: FastAPI) -> Any:
 
 app = FastAPI(
     title="SynapseMesh",
-    version="0.1.0",
+    version="0.1.1",
     description="Model-routing mesh and VLA command intake service.",
     lifespan=lifespan,
 )
@@ -127,6 +139,37 @@ def get_semantic_router(request: Request) -> SemanticRouter:
     return cast(SemanticRouter, request.app.state.semantic_router)
 
 
+async def require_api_key(
+    x_api_key: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Enforce SYNAPSEMESH_API_KEY (X-API-Key or Authorization: Bearer) when configured."""
+
+    expected = settings.SYNAPSEMESH_API_KEY
+    if not expected:
+        return
+    presented = x_api_key
+    if presented is None and authorization and authorization.lower().startswith("bearer "):
+        presented = authorization[7:].strip()
+    if presented is None or not hmac.compare_digest(
+        presented.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing or invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+if not settings.SYNAPSEMESH_API_KEY:
+    logger.warning(
+        "SYNAPSEMESH_API_KEY is not set: /v1/bus/* and /v1/route/select are "
+        "unauthenticated. Bind to 127.0.0.1 or set SYNAPSEMESH_API_KEY before "
+        "exposing SynapseMesh on a network."
+    )
+
+AUTH = [Depends(require_api_key)]
+
 BrokerDependency = Annotated[StreamBroker, Depends(get_broker)]
 DetectorDependency = Annotated[DeadlockLoopInterceptor, Depends(get_detector)]
 LockerDependency = Annotated[DistributedAgentLocker, Depends(get_locker)]
@@ -151,20 +194,23 @@ async def accept_vla_command(
 
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("application/json"):
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="body is not valid JSON") from exc
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="JSON body must be an object")
         frame_id = str(payload.get("frame_id", "unknown-frame"))
-        drift_score = float(payload.get("drift_score", 0.0))
+        drift_score = _parse_drift_score(payload.get("drift_score", 0.0))
         frame_state = str(payload.get("frame_state", "NOMINAL_STABLE"))
         high_fidelity_upload = bool(payload.get("high_fidelity_upload", False))
     else:
         frame_id = form_frame_id or "unknown-frame"
-        drift_score = float(form_drift_score or 0.0)
+        drift_score = _parse_drift_score(form_drift_score or 0.0)
         frame_state = form_frame_state or "ANOMALY_TRIGGERED"
         high_fidelity_upload = file is not None
         if file is not None:
-            await file.read()
+            await _drain_upload(file, settings.VLA_MAX_UPLOAD_BYTES)
 
     return VLACommandResponse(
         accepted=True,
@@ -177,6 +223,40 @@ async def accept_vla_command(
     )
 
 
+def _parse_drift_score(raw: object) -> float:
+    """drift_score must be a finite number; anything else is a client error (422)."""
+
+    if isinstance(raw, bool):
+        raw = float(raw)
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="drift_score must be a number",
+        ) from exc
+    if not math.isfinite(value):
+        raise HTTPException(
+            status_code=422,
+            detail="drift_score must be finite",
+        )
+    return value
+
+
+async def _drain_upload(file: UploadFile, limit: int) -> int:
+    """Consume the upload in chunks, refusing (413) anything over ``limit`` bytes."""
+
+    total = 0
+    while chunk := await file.read(1024 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"upload exceeds {limit} bytes",
+            )
+    return total
+
+
 def _deterministic_motor_commands(drift_score: float, frame_state: str) -> list[float]:
     if frame_state == "NOMINAL_STABLE":
         return [0.0, 0.0, 0.0]
@@ -184,7 +264,7 @@ def _deterministic_motor_commands(drift_score: float, frame_state: str) -> list[
     return [round(bounded, 4), round(-bounded / 2, 4), 0.0]
 
 
-@app.post("/v1/bus/broadcast", response_model=BroadcastResponse)
+@app.post("/v1/bus/broadcast", response_model=BroadcastResponse, dependencies=AUTH)
 async def broadcast_event(
     payload: BroadcastRequest,
     broker: BrokerDependency,
@@ -212,7 +292,7 @@ async def broadcast_event(
     return BroadcastResponse(topic=payload.topic, event_id=event_id, accepted=True)
 
 
-@app.post("/v1/bus/claim", response_model=ClaimResponse)
+@app.post("/v1/bus/claim", response_model=ClaimResponse, dependencies=AUTH)
 async def claim_task(
     payload: ClaimRequest,
     locker: LockerDependency,
@@ -232,7 +312,7 @@ async def claim_task(
     return ClaimResponse(task_id=payload.task_id, agent_id=payload.agent_id, acquired=acquired)
 
 
-@app.post("/v1/bus/renew", response_model=LeaseResponse)
+@app.post("/v1/bus/renew", response_model=LeaseResponse, dependencies=AUTH)
 async def renew_task(
     payload: ClaimRequest,
     locker: LockerDependency,
@@ -252,7 +332,7 @@ async def renew_task(
     return LeaseResponse(task_id=payload.task_id, agent_id=payload.agent_id, ok=ok)
 
 
-@app.post("/v1/bus/release", response_model=LeaseResponse)
+@app.post("/v1/bus/release", response_model=LeaseResponse, dependencies=AUTH)
 async def release_task(
     payload: ClaimRequest,
     locker: LockerDependency,
@@ -272,7 +352,7 @@ async def release_task(
     return LeaseResponse(task_id=payload.task_id, agent_id=payload.agent_id, ok=ok)
 
 
-@app.post("/v1/route/select", response_model=RoutingDecision)
+@app.post("/v1/route/select", response_model=RoutingDecision, dependencies=AUTH)
 async def select_route(
     payload: RoutingRequest,
     catalog: ModelCatalogDependency,

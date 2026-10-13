@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-13
+
+### Security
+- Optional API key: set `SYNAPSEMESH_API_KEY` to require `X-API-Key` /
+  `Authorization: Bearer` on `/v1/bus/*` and `/v1/route/select` (constant-time
+  compare). Previously anyone who could reach the port could publish events and
+  claim, renew or release any task lock. Unset keeps the old open behaviour and
+  logs a warning.
+- `/v1/vla/commands` reads uploads in 1 MiB chunks and rejects anything over
+  `VLA_MAX_UPLOAD_BYTES` (default 16 MiB) with 413, instead of buffering an
+  unbounded body in memory.
+
+### Fixed
+- `/v1/vla/commands`: a non-numeric `drift_score` (`"abc"`, `null`, a list) or a
+  non-finite one (`NaN`, `inf`) now returns 422 instead of a 500 / NaN motor
+  commands; malformed JSON returns 400 instead of 500.
+
 ## [0.1.0] - 2026-10-13
 
 First tagged release.

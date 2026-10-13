@@ -69,6 +69,8 @@ uvicorn app.main:app --reload
 | `MAX_LOOP_DEPTH` | `4` | Max DFS depth the loop detector will traverse before treating a handoff chain as unsafe. |
 | `LOCK_TTL_MS` | `10000` | Lease TTL (ms) applied to task locks acquired via `SET NX PX`. |
 | `AGENT_BUS_ENV` | `production` | Free-form environment label surfaced on `/healthz` and in startup logs. |
+| `SYNAPSEMESH_API_KEY` | _(unset)_ | When set, `/v1/bus/*` and `/v1/route/select` require it as `X-API-Key: <key>` or `Authorization: Bearer <key>` (401 otherwise). `/healthz` and the Spatial-Flux intake `/v1/vla/commands` stay open. Unset = unauthenticated (a warning is logged): keep the default `127.0.0.1` bind. |
+| `VLA_MAX_UPLOAD_BYTES` | `16777216` | Largest frame upload `/v1/vla/commands` accepts (413 above it). |
 
 Settings load from the environment and an optional `.env` file (see
 `Settings.model_config` in `app/config.py`).
